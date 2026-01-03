@@ -22,3 +22,9 @@ jobs:
       run: dotnet build --no-restore
     - name: Test
       run: dotnet test --no-build --verbosity normal
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4 # Action to upload files
+      with:
+        name: my-build-artifact # The name for your artifact
+        path: dist/ # The path to the directory or file(s) you want to upload
+        retention-days: 5 # Optional: specify how long to keep the artifact (default 90 days)
