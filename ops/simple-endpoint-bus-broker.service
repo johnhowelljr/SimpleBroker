@@ -1,0 +1,35 @@
+[Unit]
+Description=SimpleEndpointBus Broker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+
+# Recommended: run the published self-contained binary from /opt/simple-endpoint-bus/broker
+WorkingDirectory=/opt/simple-endpoint-bus/broker
+ExecStart=/opt/simple-endpoint-bus/broker/SimpleEndpointBus.Broker
+
+# Optional environment file (set SEB_BaseUri, SEB_Peers, etc.)
+EnvironmentFile=-/etc/default/simple-endpoint-bus-broker
+
+Restart=always
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# Hardening (safe defaults for a LAN service)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/simple-endpoint-bus/broker
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Run as non-root
+User=seb
+Group=seb
+
+[Install]
+WantedBy=multi-user.target
