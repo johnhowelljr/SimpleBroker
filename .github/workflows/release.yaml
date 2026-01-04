@@ -1,0 +1,158 @@
+name: Build + Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"   # e.g. v1.2.3
+
+permissions:
+  contents: write   # required to create a GitHub Release + upload assets
+
+jobs:
+  build:
+    name: Build artifacts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore solution
+        run: dotnet restore ./SimpleEndpointBus.sln
+
+      - name: Build solution (Release)
+        run: dotnet build ./SimpleEndpointBus.sln -c Release --no-restore
+
+      - name: Test solution (Release)
+        run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
+
+      # ---------------------------
+      # Linux: publish + include docs/ops + zip
+      # ---------------------------
+      - name: Publish + bundle (Linux, Release, no PDB, include docs/ops)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          rm -rf bundle dist
+          mkdir -p dist bundle
+
+          # Publish every non-test project in the solution into dist/<ProjectName>
+          dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
+            [[ -z "$proj" ]] && continue
+
+            if [[ "$proj" == *"Test"* || "$proj" == *"Tests"* ]]; then
+              echo "Skipping test project: $proj"
+              continue
+            fi
+
+            name="$(basename "$proj" .csproj)"
+            out="dist/$name"
+            echo "Publishing $proj -> $out"
+
+            dotnet publish "$proj" -c Release --no-build -o "$out" \
+              -p:DebugType=None -p:DebugSymbols=false
+
+            # Safety: remove any pdbs if produced by packages/tools
+            find "$out" -type f -name "*.pdb" -delete
+          done
+
+          # Bundle layout (docs/ops alongside binaries)
+          cp -R dist bundle/dist
+          if [ -d "docs" ]; then cp -R docs bundle/docs; fi
+          if [ -d "ops"  ]; then cp -R ops  bundle/ops;  fi
+
+          zip -r "SimpleEndpointBus-linux.zip" bundle
+
+      # ---------------------------
+      # Windows: publish + include docs/ops + zip
+      # ---------------------------
+      - name: Publish + bundle (Windows, Release, no PDB, include docs/ops)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path dist)   { Remove-Item -Recurse -Force dist }
+          if (Test-Path bundle) { Remove-Item -Recurse -Force bundle }
+          New-Item -ItemType Directory -Path dist   | Out-Null
+          New-Item -ItemType Directory -Path bundle | Out-Null
+
+          $projects = (dotnet sln .\SimpleEndpointBus.sln list | Select-Object -Skip 2) | Where-Object { $_ -and $_.Trim() -ne "" }
+
+          foreach ($proj in $projects) {
+            if ($proj -match 'Test|Tests') {
+              Write-Host "Skipping test project: $proj"
+              continue
+            }
+
+            $name = [System.IO.Path]::GetFileNameWithoutExtension($proj)
+            $out  = Join-Path "dist" $name
+            Write-Host "Publishing $proj -> $out"
+
+            dotnet publish $proj -c Release --no-build -o $out `
+              -p:DebugType=None -p:DebugSymbols=false
+
+            Get-ChildItem -Path $out -Recurse -Filter *.pdb -ErrorAction SilentlyContinue |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+
+          New-Item -ItemType Directory -Path (Join-Path bundle "dist") | Out-Null
+          Copy-Item -Recurse -Force dist (Join-Path bundle "dist")
+
+          if (Test-Path "docs") { Copy-Item -Recurse -Force "docs" (Join-Path bundle "docs") }
+          if (Test-Path "ops")  { Copy-Item -Recurse -Force "ops"  (Join-Path bundle "ops")  }
+
+          if (Test-Path SimpleEndpointBus-windows.zip) { Remove-Item SimpleEndpointBus-windows.zip -Force }
+          Compress-Archive -Path bundle\* -DestinationPath SimpleEndpointBus-windows.zip
+
+      - name: Upload zip artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleEndpointBus-linux
+          path: SimpleEndpointBus-linux.zip
+          if-no-files-found: error
+
+      - name: Upload zip artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleEndpointBus-windows
+          path: SimpleEndpointBus-windows.zip
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SimpleEndpointBus-linux
+          path: release-assets
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SimpleEndpointBus-windows
+          path: release-assets
+
+      - name: List release assets
+        run: ls -la release-assets
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/SimpleEndpointBus-linux.zip
+            release-assets/SimpleEndpointBus-windows.zip
