@@ -11,20 +11,50 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 8.0.x # You can change this to your desired version, e.g., '8.0.x'
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Build
-      run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
-    - name: Upload build artifact
-      uses: actions/upload-artifact@v4 # Action to upload files
-      with:
-        name: my-build-artifact # The name for your artifact
-        path: dist/ # The path to the directory or file(s) you want to upload
-        retention-days: 5 # Optional: specify how long to keep the artifact (default 90 days)
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore solution
+        run: dotnet restore ./SimpleEndpointBus.sln
+
+      - name: Build solution
+        run: dotnet build ./SimpleEndpointBus.sln -c Release --no-restore
+
+      - name: Test solution
+        run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
+
+      # Publish ALL projects in the solution (skips test projects; handles multi-project solutions)
+      - name: Publish solution projects to dist
+        shell: bash
+        run: |
+          rm -rf dist
+          mkdir -p dist
+
+          # Publish every non-test project in the solution into its own subfolder under dist/
+          dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
+            if [[ "$proj" == *"Test"* || "$proj" == *"Tests"* ]]; then
+              echo "Skipping test project: $proj"
+              continue
+            fi
+
+            name="$(basename "$proj" .csproj)"
+            echo "Publishing $proj -> dist/$name"
+            dotnet publish "$proj" -c Release --no-build -o "dist/$name"
+          done
+
+      - name: Zip published output
+        shell: bash
+        run: |
+          zip -r SimpleEndpointBus.zip dist
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleEndpointBus-build
+          path: SimpleEndpointBus.zip
+          retention-days: 5
+          if-no-files-found: error
