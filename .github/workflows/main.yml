@@ -25,14 +25,14 @@ jobs:
       - name: Restore solution
         run: dotnet restore ./SimpleEndpointBus.sln
 
-      - name: Build solution
+      - name: Build solution (Release)
         run: dotnet build ./SimpleEndpointBus.sln -c Release --no-restore
 
-      - name: Test solution
+      - name: Test solution (Release)
         run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
 
-      # Publish projects (Linux)
-      - name: Publish solution projects to dist (Linux)
+      # Publish + zip (Linux)
+      - name: Publish solution projects to dist (Linux, Release, no PDB)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -40,20 +40,28 @@ jobs:
           mkdir -p dist
 
           dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
+            [[ -z "$proj" ]] && continue
+
             if [[ "$proj" == *"Test"* || "$proj" == *"Tests"* ]]; then
               echo "Skipping test project: $proj"
               continue
             fi
 
             name="$(basename "$proj" .csproj)"
-            echo "Publishing $proj -> dist/$name"
-            dotnet publish "$proj" -c Release --no-build -o "dist/$name"
+            out="dist/$name"
+            echo "Publishing $proj -> $out"
+
+            dotnet publish "$proj" -c Release --no-build -o "$out" \
+              -p:DebugType=None -p:DebugSymbols=false
+
+            # Just in case anything still produced PDBs
+            find "$out" -type f -name "*.pdb" -delete
           done
 
           zip -r SimpleEndpointBus-linux.zip dist
 
-      # Publish projects (Windows)
-      - name: Publish solution projects to dist (Windows)
+      # Publish + zip (Windows)
+      - name: Publish solution projects to dist (Windows, Release, no PDB)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -70,9 +78,13 @@ jobs:
 
             $name = [System.IO.Path]::GetFileNameWithoutExtension($proj)
             $out  = Join-Path "dist" $name
-
             Write-Host "Publishing $proj -> $out"
-            dotnet publish $proj -c Release --no-build -o $out
+
+            dotnet publish $proj -c Release --no-build -o $out `
+              -p:DebugType=None -p:DebugSymbols=false
+
+            # Just in case anything still produced PDBs
+            Get-ChildItem -Path $out -Recurse -Filter *.pdb -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
           }
 
           if (Test-Path SimpleEndpointBus-windows.zip) { Remove-Item SimpleEndpointBus-windows.zip -Force }
