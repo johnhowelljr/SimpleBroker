@@ -31,14 +31,17 @@ jobs:
       - name: Test solution (Release)
         run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
 
-      # Publish + zip (Linux)
-      - name: Publish solution projects to dist (Linux, Release, no PDB)
+      # ---------------------------
+      # Linux: publish + add docs/ops + zip
+      # ---------------------------
+      - name: Publish + bundle (Linux, Release, no PDB, include docs/ops)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          rm -rf dist
-          mkdir -p dist
+          rm -rf bundle dist
+          mkdir -p dist bundle
 
+          # Publish every non-test project in the solution into dist/<ProjectName>
           dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
             [[ -z "$proj" ]] && continue
 
@@ -54,19 +57,29 @@ jobs:
             dotnet publish "$proj" -c Release --no-build -o "$out" \
               -p:DebugType=None -p:DebugSymbols=false
 
-            # Just in case anything still produced PDBs
+            # Safety: remove any pdbs if produced by packages/tools
             find "$out" -type f -name "*.pdb" -delete
           done
 
-          zip -r SimpleEndpointBus-linux.zip dist
+          # Bundle layout (so docs/ops sit next to binaries)
+          mkdir -p bundle
+          cp -R dist bundle/dist
+          if [ -d "docs" ]; then cp -R docs bundle/docs; fi
+          if [ -d "ops"  ]; then cp -R ops  bundle/ops;  fi
 
-      # Publish + zip (Windows)
-      - name: Publish solution projects to dist (Windows, Release, no PDB)
+          zip -r SimpleEndpointBus-linux.zip bundle
+
+      # ---------------------------
+      # Windows: publish + add docs/ops + zip
+      # ---------------------------
+      - name: Publish + bundle (Windows, Release, no PDB, include docs/ops)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
-          New-Item -ItemType Directory -Path dist | Out-Null
+          if (Test-Path dist)   { Remove-Item -Recurse -Force dist }
+          if (Test-Path bundle) { Remove-Item -Recurse -Force bundle }
+          New-Item -ItemType Directory -Path dist   | Out-Null
+          New-Item -ItemType Directory -Path bundle | Out-Null
 
           $projects = (dotnet sln .\SimpleEndpointBus.sln list | Select-Object -Skip 2) | Where-Object { $_ -and $_.Trim() -ne "" }
 
@@ -83,12 +96,19 @@ jobs:
             dotnet publish $proj -c Release --no-build -o $out `
               -p:DebugType=None -p:DebugSymbols=false
 
-            # Just in case anything still produced PDBs
-            Get-ChildItem -Path $out -Recurse -Filter *.pdb -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path $out -Recurse -Filter *.pdb -ErrorAction SilentlyContinue |
+              Remove-Item -Force -ErrorAction SilentlyContinue
           }
 
+          # Bundle layout
+          New-Item -ItemType Directory -Path (Join-Path bundle "dist") | Out-Null
+          Copy-Item -Recurse -Force dist (Join-Path bundle "dist")
+
+          if (Test-Path "docs") { Copy-Item -Recurse -Force "docs" (Join-Path bundle "docs") }
+          if (Test-Path "ops")  { Copy-Item -Recurse -Force "ops"  (Join-Path bundle "ops")  }
+
           if (Test-Path SimpleEndpointBus-windows.zip) { Remove-Item SimpleEndpointBus-windows.zip -Force }
-          Compress-Archive -Path dist\* -DestinationPath SimpleEndpointBus-windows.zip
+          Compress-Archive -Path bundle\* -DestinationPath SimpleEndpointBus-windows.zip
 
       - name: Upload zip artifact (Linux)
         if: runner.os == 'Linux'
