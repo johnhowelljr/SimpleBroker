@@ -1,0 +1,133 @@
+name: Manual Release (tag + build + publish)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer version (example: 1.2.3). Tag will be v<version>"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write  # needed to push tags + create releases
+
+jobs:
+  tag:
+    name: Create and push tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set_tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version and set tag
+        id: set_tag
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be SemVer like 1.2.3"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          TAG="${{ steps.set_tag.outputs.tag }}"
+
+          # Fail if tag already exists (local or remote)
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists locally: $TAG"
+            exit 1
+          fi
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "Tag already exists on origin: $TAG"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+  build:
+    name: Build artifacts (${{ matrix.os }})
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore solution
+        run: dotnet restore ./SimpleEndpointBus.sln
+
+      - name: Build solution (Release)
+        run: dotnet build ./SimpleEndpointBus.sln -c Release --no-restore
+
+      - name: Test solution (Release)
+        run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
+
+      # ---------------------------
+      # Linux: publish + include docs/ops + zip
+      # ---------------------------
+      - name: Publish + bundle (Linux, Release, no PDB, include docs/ops)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          rm -rf bundle dist
+          mkdir -p dist bundle
+
+          dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
+            [[ -z "$proj" ]] && continue
+            if [[ "$proj" == *"Test"* || "$proj" == *"Tests"* ]]; then
+              echo "Skipping test project: $proj"
+              continue
+            fi
+
+            name="$(basename "$proj" .csproj)"
+            out="dist/$name"
+            echo "Publishing $proj -> $out"
+
+            dotnet publish "$proj" -c Release --no-build -o "$out" \
+              -p:DebugType=None -p:DebugSymbols=false
+
+            find "$out" -type f -name "*.pdb" -delete
+          done
+
+          cp -R dist bundle/dist
+          if [ -d "docs" ]; then cp -R docs bundle/docs; fi
+          if [ -d "ops"  ]; then cp -R ops  bundle/ops;  fi
+
+          zip -r SimpleEndpointBus-linux.zip bundle
+
+      # ---------------------------
+      # Windows: publish + include docs/ops + zip
+      # ---------------------------
+      - name: Publish + bundle (Windows, Release, no PDB, include docs/ops)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path dist)   { Remove-Item -Recurse -Force dist }
