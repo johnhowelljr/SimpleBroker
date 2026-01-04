@@ -8,7 +8,11 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -27,14 +31,14 @@ jobs:
       - name: Test solution
         run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
 
-      # Publish ALL projects in the solution (skips test projects; handles multi-project solutions)
-      - name: Publish solution projects to dist
+      # Publish projects (Linux)
+      - name: Publish solution projects to dist (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           rm -rf dist
           mkdir -p dist
 
-          # Publish every non-test project in the solution into its own subfolder under dist/
           dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
             if [[ "$proj" == *"Test"* || "$proj" == *"Tests"* ]]; then
               echo "Skipping test project: $proj"
@@ -46,15 +50,48 @@ jobs:
             dotnet publish "$proj" -c Release --no-build -o "dist/$name"
           done
 
-      - name: Zip published output
-        shell: bash
-        run: |
-          zip -r SimpleEndpointBus.zip dist
+          zip -r SimpleEndpointBus-linux.zip dist
 
-      - name: Upload zip artifact
+      # Publish projects (Windows)
+      - name: Publish solution projects to dist (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          New-Item -ItemType Directory -Path dist | Out-Null
+
+          $projects = (dotnet sln .\SimpleEndpointBus.sln list | Select-Object -Skip 2) | Where-Object { $_ -and $_.Trim() -ne "" }
+
+          foreach ($proj in $projects) {
+            if ($proj -match 'Test|Tests') {
+              Write-Host "Skipping test project: $proj"
+              continue
+            }
+
+            $name = [System.IO.Path]::GetFileNameWithoutExtension($proj)
+            $out  = Join-Path "dist" $name
+
+            Write-Host "Publishing $proj -> $out"
+            dotnet publish $proj -c Release --no-build -o $out
+          }
+
+          if (Test-Path SimpleEndpointBus-windows.zip) { Remove-Item SimpleEndpointBus-windows.zip -Force }
+          Compress-Archive -Path dist\* -DestinationPath SimpleEndpointBus-windows.zip
+
+      - name: Upload zip artifact (Linux)
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: SimpleEndpointBus-build
-          path: SimpleEndpointBus.zip
+          name: SimpleEndpointBus-linux
+          path: SimpleEndpointBus-linux.zip
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: Upload zip artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleEndpointBus-windows
+          path: SimpleEndpointBus-windows.zip
           retention-days: 5
           if-no-files-found: error
