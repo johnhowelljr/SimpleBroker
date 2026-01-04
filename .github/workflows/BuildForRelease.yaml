@@ -1,0 +1,231 @@
+name: Manual Release (tag + draft release + build + upload assets)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.2.3 or v1.2.3)"
+        required: true
+        type: string
+      target_branch:
+        description: "Branch to tag from"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Create tag + draft release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+
+    steps:
+      - name: Checkout target branch (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Validate version + compute tag
+        id: vars
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+
+          # Accept "1.2.3" or "v1.2.3"
+          if [[ "$V" =~ ^v ]]; then
+            TAG="$V"
+          else
+            TAG="v$V"
+          fi
+
+          # Basic SemVer validation: vX.Y.Z (optionally with -suffix or +meta)
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([\-+][0-9A-Za-z\.-]+)?$ ]]; then
+            echo "Invalid version. Use 1.2.3 (or v1.2.3)."
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Tag will be: $TAG"
+
+      - name: Fail if tag already exists on origin
+        shell: bash
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "Tag already exists on origin: $TAG"
+            exit 1
+          fi
+
+      - name: Create and push annotated tag
+        shell: bash
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create draft GitHub Release (notes only)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+
+  build:
+    name: Build artifacts (${{ matrix.os }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore solution
+        run: dotnet restore ./SimpleEndpointBus.sln
+
+      - name: Build solution (Release)
+        run: dotnet build ./SimpleEndpointBus.sln -c Release --no-restore
+
+      - name: Test solution (Release)
+        run: dotnet test ./SimpleEndpointBus.sln -c Release --no-build --verbosity normal
+
+      # ---------------------------
+      # Linux: publish + include docs/ops + zip (no PDB)
+      # ---------------------------
+      - name: Publish + bundle + zip (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          rm -rf bundle dist
+          mkdir -p dist bundle
+
+          dotnet sln ./SimpleEndpointBus.sln list | tail -n +3 | while read -r proj; do
+            [[ -z "$proj" ]] && continue
+            if [[ "$proj" == *"Test"* || "$proj" == *"Tests"* ]]; then
+              echo "Skipping test project: $proj"
+              continue
+            fi
+
+            name="$(basename "$proj" .csproj)"
+            out="dist/$name"
+            echo "Publishing $proj -> $out"
+
+            dotnet publish "$proj" -c Release --no-build -o "$out" \
+              -p:DebugType=None -p:DebugSymbols=false
+
+            find "$out" -type f -name "*.pdb" -delete
+          done
+
+          cp -R dist bundle/dist
+          if [ -d "docs" ]; then cp -R docs bundle/docs; fi
+          if [ -d "ops"  ]; then cp -R ops  bundle/ops;  fi
+
+          zip -r "SimpleEndpointBus-linux.zip" bundle
+
+      # ---------------------------
+      # Windows: publish + include docs/ops + zip (no PDB)
+      # ---------------------------
+      - name: Publish + bundle + zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path dist)   { Remove-Item -Recurse -Force dist }
+          if (Test-Path bundle) { Remove-Item -Recurse -Force bundle }
+          New-Item -ItemType Directory -Path dist   | Out-Null
+          New-Item -ItemType Directory -Path bundle | Out-Null
+
+          $projects = (dotnet sln .\SimpleEndpointBus.sln list | Select-Object -Skip 2) | Where-Object { $_ -and $_.Trim() -ne "" }
+
+          foreach ($proj in $projects) {
+            if ($proj -match 'Test|Tests') {
+              Write-Host "Skipping test project: $proj"
+              continue
+            }
+
+            $name = [System.IO.Path]::GetFileNameWithoutExtension($proj)
+            $out  = Join-Path "dist" $name
+            Write-Host "Publishing $proj -> $out"
+
+            dotnet publish $proj -c Release --no-build -o $out `
+              -p:DebugType=None -p:DebugSymbols=false
+
+            Get-ChildItem -Path $out -Recurse -Filter *.pdb -ErrorAction SilentlyContinue |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+
+          New-Item -ItemType Directory -Path (Join-Path bundle "dist") | Out-Null
+          Copy-Item -Recurse -Force dist (Join-Path bundle "dist")
+
+          if (Test-Path "docs") { Copy-Item -Recurse -Force "docs" (Join-Path bundle "docs") }
+          if (Test-Path "ops")  { Copy-Item -Recurse -Force "ops"  (Join-Path bundle "ops")  }
+
+          if (Test-Path SimpleEndpointBus-windows.zip) { Remove-Item SimpleEndpointBus-windows.zip -Force }
+          Compress-Archive -Path bundle\* -DestinationPath SimpleEndpointBus-windows.zip
+
+      - name: Upload zip artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleEndpointBus-linux
+          path: SimpleEndpointBus-linux.zip
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Upload zip artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleEndpointBus-windows
+          path: SimpleEndpointBus-windows.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  publish:
+    name: Attach assets to draft release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SimpleEndpointBus-linux
+          path: release-assets
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SimpleEndpointBus-windows
+          path: release-assets
+
+      - name: List assets
+        run: ls -la release-assets
+
+      - name: Upload assets to draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          draft: true
+          files: |
+            release-assets/SimpleEndpointBus-linux.zip
+            release-assets/SimpleEndpointBus-windows.zip
